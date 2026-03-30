@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: log-agent
+  labels:
+    app: log-agent
+spec:
+  selector:
+    matchLabels:
+      app: log-agent
+  template:
+    metadata:
+      labels:
+        app: log-agent
+    spec:
+      tolerations:
+        # Allow running on control-plane nodes (useful for single-node clusters)
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: log-agent
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Log agent started on node: $(hostname)"
+              LOG_DIR="/var/log/containers"
+              while true; do
+                echo "--- $(date) : scanning $LOG_DIR ---"
+                if ls "$LOG_DIR"/custom-app*.log 2>/dev/null | head -5; then
+                  for f in "$LOG_DIR"/custom-app*.log; do
+                    [ -f "$f" ] && tail -n 20 "$f"
+                  done
+                else
+                  echo "No custom-app log files found yet in $LOG_DIR"
+                fi
+                sleep 30
+              done
+          volumeMounts:
+            - name: container-logs
+              mountPath: /var/log/containers
+              readOnly: true
+      volumes:
+        - name: container-logs
+          hostPath:
+            path: /var/log/containers
+            type: DirectoryOrCreate

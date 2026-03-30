@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: custom-app-stateful
+  labels:
+    app: custom-app-stateful
+spec:
+  serviceName: custom-app-stateful-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: custom-app-stateful
+  template:
+    metadata:
+      labels:
+        app: custom-app-stateful
+    spec:
+      containers:
+        - name: custom-app
+          image: custom-app:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - configMapRef:
+                name: app-config
+          volumeMounts:
+            - name: logs-persistent
+              mountPath: /app/logs
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+  volumeClaimTemplates:
+    - metadata:
+        name: logs-persistent
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: custom-app-stateful-headless
+  labels:
+    app: custom-app-stateful
+spec:
+  clusterIP: None
+  selector:
+    app: custom-app-stateful
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 5000

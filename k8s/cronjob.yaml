@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: log-archiver
+  labels:
+    app: log-archiver
+spec:
+  schedule: "*/10 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: log-archiver
+              image: curlimages/curl:latest
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  ARCHIVE="/tmp/app-logs-${TIMESTAMP}.tar.gz"
+                  mkdir -p /tmp/logs
+
+                  echo "Fetching logs from custom-app-service..."
+                  curl -sf http://custom-app-service/logs -o /tmp/logs/app.log \
+                    || echo "(no logs yet or service unavailable)"
+
+                  tar -czf "$ARCHIVE" -C /tmp logs/
+                  echo "Archive created: $ARCHIVE"
+                  ls -lh "$ARCHIVE"
