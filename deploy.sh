@@ -46,4 +46,28 @@ kubectl rollout status statefulset/custom-app-stateful --timeout=120s
 echo "CronJob log-archiver:"
 kubectl apply -f "$K8S_DIR/cronjob.yaml"
 
+# 9. Istio service mesh
+echo "Installing Istio (profile: demo)..."
+if ! command -v istioctl &>/dev/null; then
+    curl -L https://istio.io/downloadIstio | sh -
+    ISTIO_DIR=$(ls -d istio-* 2>/dev/null | head -1)
+    export PATH="$PWD/$ISTIO_DIR/bin:$PATH"
+fi
+istioctl install --set profile=demo -y
 
+echo "Enabling sidecar injection for namespace default..."
+kubectl label namespace default istio-injection=enabled --overwrite
+
+echo "Restarting workloads to inject sidecars..."
+kubectl rollout restart deployment/custom-app
+kubectl rollout restart daemonset/log-agent
+kubectl rollout status deployment/custom-app --timeout=120s
+
+echo "Applying Istio Gateway..."
+kubectl apply -f "$K8S_DIR/istio-gateway.yaml"
+
+echo "Applying VirtualService..."
+kubectl apply -f "$K8S_DIR/istio-virtualservice.yaml"
+
+echo "Applying DestinationRule..."
+kubectl apply -f "$K8S_DIR/istio-destinationrule.yaml"

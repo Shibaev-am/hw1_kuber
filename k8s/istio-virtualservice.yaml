@@ -1,0 +1,54 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: custom-app-vs
+  labels:
+    app: custom-app
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - custom-app-gateway
+  http:
+    - match:
+        - uri:
+            exact: /log
+          method:
+            exact: POST
+      fault:
+        delay:
+          percentage:
+            value: 100
+          fixedDelay: 2s
+        abort:
+          httpStatus: 504
+          percentage:
+            value: 100
+      timeout: 1s
+      retries:
+        attempts: 2
+        perTryTimeout: 1s
+        retryOn: 5xx,gateway-error,reset
+      route:
+        - destination:
+            host: custom-app-service
+            port:
+              number: 80
+
+    - match:
+        - uri:
+            exact: /
+        - uri:
+            exact: /status
+        - uri:
+            exact: /logs
+      route:
+        - destination:
+            host: custom-app-service
+            port:
+              number: 80
+
+    - directResponse:
+        status: 404
+        body:
+          string: '{"error": "Not Found"}'

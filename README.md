@@ -1,4 +1,4 @@
-# Распределённая система логирования и хранения с резервным копированием
+# Распределённая система логирования и хранения с резервным копированием и Istio
 
 Kubernetes-система, которая разворачивает Flask API, балансирует нагрузку между репликами, собирает логи с узлов и автоматически архивирует их по расписанию.
 
@@ -11,13 +11,16 @@ Kubernetes-система, которая разворачивает Flask API, 
 │   ├── requirements.txt    # Зависимости (flask)
 │   └── Dockerfile          # Сборка образа на базе python:3.11-slim
 ├── k8s/
-│   ├── configmap.yaml      # Конфигурация приложения
-│   ├── pod.yaml            # Тестовый Pod
-│   ├── deployment.yaml     # Deployment с 3 репликами
-│   ├── service.yaml        # ClusterIP Service
-│   ├── statefulset.yaml    # StatefulSet с PersistentVolumeClaim
-│   ├── daemonset.yaml      # DaemonSet log-agent
-│   └── cronjob.yaml        # CronJob log-archiver
+│   ├── configmap.yaml              # Конфигурация приложения
+│   ├── pod.yaml                    # Тестовый Pod
+│   ├── deployment.yaml             # Deployment с 3 репликами
+│   ├── service.yaml                # ClusterIP Service
+│   ├── statefulset.yaml            # StatefulSet с PersistentVolumeClaim
+│   ├── daemonset.yaml              # DaemonSet log-agent
+│   ├── cronjob.yaml                # CronJob log-archiver
+│   ├── istio-gateway.yaml          # Istio Gateway (входящий HTTP-трафик на порт 80)
+│   ├── istio-virtualservice.yaml   # VirtualService (маршрутизация, 404, fault injection)
+│   └── istio-destinationrule.yaml  # DestinationRule (LEAST_CONN, conn pool, mTLS)
 ├── deploy.sh               # Единый скрипт развёртывания всей системы
 └── README.md
 ```
@@ -26,6 +29,7 @@ Kubernetes-система, которая разворачивает Flask API, 
 
 - Docker Desktop с включённым Kubernetes
 - `kubectl` (устанавливается вместе с Docker Desktop)
+- `istioctl` (устанавливается автоматически скриптом `deploy.sh`, либо вручную: `curl -L https://istio.io/downloadIstio | sh -`)
 
 ## Запуск
 
@@ -192,10 +196,115 @@ kubectl patch deployment custom-app \
   -p '{"spec":{"template":{"metadata":{"annotations":{"configmap-version":"v2"}}}}}'
 ```
 
+## Istio: тестирование
+
+### Результат deploy.sh (Istio-часть)
+
+```
+Installing Istio (profile: demo)...
+✔ Istio core installed ⛵️
+✔ Istiod installed 🧠
+✔ Egress gateways installed 🛫
+✔ Ingress gateways installed 🛬
+✔ Installation complete
+Enabling sidecar injection for namespace default...
+namespace/default labeled
+Restarting workloads to inject sidecars...
+deployment.apps/custom-app restarted
+daemonset.apps/log-agent restarted
+deployment "custom-app" successfully rolled out
+Applying Istio Gateway...
+gateway.networking.istio.io/custom-app-gateway created
+Applying VirtualService...
+virtualservice.networking.istio.io/custom-app-vs created
+Applying DestinationRule...
+destinationrule.networking.istio.io/custom-app-dr created
+```
+
+### Поды с Istio sidecar (2/2 READY)
+
+```
+$ kubectl get pods -o wide
+NAME                          READY   STATUS      RESTARTS   AGE   IP           NODE
+custom-app-5675d6d84f-h6knj   2/2     Running     0          16m   10.1.0.195   docker-desktop
+custom-app-5675d6d84f-jnjsf   2/2     Running     0          15m   10.1.0.196   docker-desktop
+custom-app-5675d6d84f-lrgcz   2/2     Running     0          15m   10.1.0.198   docker-desktop
+log-agent-ds4t5               2/2     Running     0          15m   10.1.0.197   docker-desktop
+```
+
+`2/2 READY` — Istio sidecar (envoy-proxy) внедрён в каждый pod (было `1/1`).
+
+### Получить внешний IP ingress-gateway
+
+```
+$ kubectl get svc istio-ingressgateway -n istio-system
+NAME                   TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)
+istio-ingressgateway   LoadBalancer   10.98.122.115   localhost     15021:31632/TCP,80:32395/TCP,...
+
+$ export INGRESS_IP=localhost
+```
+
+### Проверка маршрутов
+
+```
+$ curl http://$INGRESS_IP/
+Welcome to the custom app
+
+$ curl http://$INGRESS_IP/status
+{"status":"ok"}
+
+$ curl http://$INGRESS_IP/logs
+2026-04-19 17:03:33,844 - INFO - Starting app on port 5000
+...
+
+$ curl http://$INGRESS_IP/wrong
+{"error": "Not Found"}
+```
+
+### Fault injection на POST /log
+
+Задержка 2с + abort 504 — запрос завершится с **504 Gateway Timeout** примерно за 2 секунды.
+Istio выполняет до 2 повторных попыток, каждая тоже получает 504.
+
+```
+$ time curl -s -o /dev/null -w "%{http_code} %{time_total}s" \
+    -X POST http://$INGRESS_IP/log \
+    -H 'Content-Type: application/json' \
+    -d '{"message": "test fault injection"}'
+504 2.008201s
+```
+
+### Проверка mTLS (сертификаты Istio в pod-е)
+
+```
+$ istioctl proxy-config secret \
+    $(kubectl get pod -l app=custom-app -o name | head -1 | cut -d/ -f2)
+RESOURCE NAME   TYPE        STATUS   VALID CERT   SERIAL NUMBER                        NOT AFTER                NOT BEFORE
+default         Cert Chain  ACTIVE   true         109dd87254bca690b7ccf55f6447e488     2026-04-20T17:03:15Z     2026-04-19T17:01:15Z
+ROOTCA          CA          ACTIVE   true         4405be81ed3385fbc984cc1cc3bf7e7e     2036-04-16T17:02:53Z     2026-04-19T17:02:53Z
+```
+
+Активные mTLS-сертификаты подтверждают работу ISTIO_MUTUAL режима, заданного в DestinationRule.
+
+## Пошаговые скрипты
+
+| Скрипт | Задание |
+|---|---|
+| `bash scripts/task1_build.sh` | Сборка Docker-образа |
+| `bash scripts/task2_pod.sh` | Тестовый Pod |
+| `bash scripts/task3_deployment.sh` | Deployment с 3 репликами |
+| `bash scripts/task4_service.sh` | ClusterIP Service |
+| `bash scripts/task5_daemonset.sh` | DaemonSet log-agent |
+| `bash scripts/task6_cronjob.sh` | CronJob log-archiver |
+| `bash scripts/task7_statefulset.sh` | StatefulSet |
+| `bash scripts/task8_istio.sh` | Istio Gateway + VirtualService + DestinationRule |
+
 ## Удаление всех ресурсов
 
 ```bash
 kubectl delete -f k8s/
 kubectl delete pvc -l app=custom-app-stateful
+istioctl uninstall --purge -y
+kubectl label namespace default istio-injection-
 docker rmi custom-app:latest
 ```
